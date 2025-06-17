@@ -18,6 +18,8 @@ import Animated, {
   withSpring,
   useSharedValue,
 } from 'react-native-reanimated';
+import * as FileSystem from 'expo-file-system';
+import { Audio } from 'expo-av';
 
 let VoiceModule: typeof Voice | null = null;
 try {
@@ -45,6 +47,10 @@ interface ColorButtonProps {
   color: Color;
   isLoading: boolean;
   onPress: (color: Color) => void;
+}
+
+interface WhisperResponse {
+  text: string;
 }
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
@@ -89,14 +95,29 @@ const ColorButton: React.FC<ColorButtonProps> = ({ color, isLoading, onPress }) 
   );
 };
 
+// Add these color variations at the top with your COLORS array
+const COLOR_VARIATIONS = {
+  red: ['red', 'crimson', 'scarlet'],
+  blue: ['blue', 'azure', 'navy'],
+  green: ['green', 'emerald', 'lime'],
+  yellow: ['yellow', 'golden', 'amber'],
+  white: ['white', 'bright', 'light'],
+  black: ['black', 'dark', 'midnight'],
+  purple: ['purple', 'violet', 'lavender'],
+  orange: ['orange', 'tangerine'],
+  pink: ['pink', 'rose', 'magenta']
+};
+
 export default function HomeScreen() {
   const [webhookUrl, setWebhookUrl] = useState("");
   const [isListening, setIsListening] = useState(false);
   const [lastCommand, setLastCommand] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [voiceAvailable, setVoiceAvailable] = useState(false);
+  const [openAIKey, setOpenAIKey] = useState("");
+  const [recording, setRecording] = useState<Audio.Recording | null>(null);
 
-  const sendCommand = useCallback(async (action: string, color?: string) => {
+  const sendCommand = useCallback(async (action: string, value?: string) => {
     if (!webhookUrl.trim()) {
       if (Platform.OS !== "web") {
         Alert.alert("Error", "Please set your n8n webhook URL first");
@@ -106,117 +127,207 @@ export default function HomeScreen() {
 
     setIsLoading(true);
     try {
-      const payload = color ? { action, color } : { action };
-      console.log("Sending command:", payload);
+      const payload: Record<string, string> = { action };
+      
+      // Add appropriate parameter based on action
+      if (action === 'set_color' && value) {
+        payload.color = value;
+      } else if (action === 'set_brightness' && value) {
+        payload.brightness = value;
+      }
 
-      // Convert payload to query parameters
+      console.log("Sending command:", payload);
       const queryParams = new URLSearchParams(payload).toString();
       const urlWithParams = `${webhookUrl.trim()}?${queryParams}`;
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
-
-      const response = await fetch(urlWithParams, {
-        method: "GET", // Changed from POST to GET
-        headers: {
-          Accept: "application/json",
-        },
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (response.ok) {
-        const actionText = color ? `${action} (${color})` : action;
-        console.log("Command sent successfully:", actionText);
-        if (Platform.OS !== "web") {
-          Alert.alert("Success", `Command sent: ${actionText}`);
-        }
-      } else {
-        const errorText = await response.text().catch(() => "Unknown error");
-        throw new Error(`HTTP ${response.status}: ${errorText}`);
+      const response = await fetch(urlWithParams);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${await response.text()}`);
       }
+      
+      setLastCommand(`${action} ${value || ''}`);
     } catch (error) {
       console.error("Error sending command:", error);
-      if (Platform.OS !== "web") {
-        const errorMessage =
-          error instanceof Error ? error.message : "Unknown error";
-        Alert.alert("Error", `Failed to send command: ${errorMessage}`);
-      }
+      Alert.alert("Error", "Failed to send command. Please check your webhook URL.");
     } finally {
       setIsLoading(false);
     }
   }, [webhookUrl]);
 
-  const parseVoiceCommand = useCallback((command: string) => {
-    try {
-      const lowerCommand = command.toLowerCase();
+  const processVoiceCommand = useCallback(async (text: string) => {
+    const command = text.toLowerCase().trim();
+    console.log('Processing command:', command);
+    
+    let action = '';
+    let color = '';
 
-      if (
-        lowerCommand.includes("turn on") ||
-        lowerCommand.includes("switch on") ||
-        lowerCommand === "on"
-      ) {
-        sendCommand("on");
-      } else if (
-        lowerCommand.includes("turn off") ||
-        lowerCommand.includes("switch off") ||
-        lowerCommand === "off"
-      ) {
-        sendCommand("off");
-      } else if (
-        lowerCommand.includes("red") ||
-        lowerCommand.includes("change to red")
-      ) {
-        sendCommand("color", "red");
-      } else if (
-        lowerCommand.includes("blue") ||
-        lowerCommand.includes("change to blue")
-      ) {
-        sendCommand("color", "blue");
-      } else if (
-        lowerCommand.includes("green") ||
-        lowerCommand.includes("change to green")
-      ) {
-        sendCommand("color", "green");
-      } else if (
-        lowerCommand.includes("yellow") ||
-        lowerCommand.includes("change to yellow")
-      ) {
-        sendCommand("color", "yellow");
-      } else if (
-        lowerCommand.includes("white") ||
-        lowerCommand.includes("change to white")
-      ) {
-        sendCommand("color", "white");
-      } else {
-        if (Platform.OS !== "web") {
-          Alert.alert(
-            "Command not recognized",
-            'Try saying: "Turn on", "Turn off", or "Change to red"\n\nReceived: "' +
-              command +
-              '"',
-          );
+    // Handle power commands
+    if (command.match(/turn (on|off)/i) || command.match(/(on|off)/i)) {
+      action = command.includes('off') ? 'turn_off' : 'turn_on';
+    }
+    
+    // Handle color commands
+    const colorPhrases = [
+      'change to', 'switch to', 'make it', 'set to', 'set it to',
+      'change the color to', 'set the color to', 'turn it', 'set light to',
+      'change light to', 'make the light'
+    ];
+
+    // Check for any color-related phrase
+    const hasColorCommand = colorPhrases.some(phrase => command.includes(phrase)) ||
+      command.includes('color') ||
+      Object.values(COLOR_VARIATIONS).flat().some(color => command.includes(color));
+
+    if (hasColorCommand || !action) { // Check for color if no power command found
+      // Find the color in the command
+      for (const [baseColor, variations] of Object.entries(COLOR_VARIATIONS)) {
+        if (variations.some(variant => command.includes(variant))) {
+          action = 'set_color';
+          color = baseColor;
+          break;
         }
       }
-    } catch (error) {
-      console.error("Error parsing voice command:", error);
+    }
+
+    // Handle brightness commands (if your webhook supports it)
+    if (command.match(/(bright|dim|brightness)/i)) {
+      if (command.match(/(full|max|maximum|brightest)/i)) {
+        action = 'set_brightness';
+        color = '100';
+      } else if (command.match(/(half|medium|mid)/i)) {
+        action = 'set_brightness';
+        color = '50';
+      } else if (command.match(/(low|dim|minimum)/i)) {
+        action = 'set_brightness';
+        color = '20';
+      }
+    }
+
+    if (action) {
+      console.log(`Executing command: ${action} ${color}`);
+      await sendCommand(action, color);
+      // Provide feedback to user
+      let feedbackMessage = `Command executed: ${action.replace('_', ' ')}`;
+      if (color) {
+        feedbackMessage += ` (${color})`;
+      }
+      Alert.alert('Success', feedbackMessage);
+    } else {
+      console.log('No valid command found in:', command);
+      Alert.alert('Command Not Recognized', 
+        'Try saying things like:\n' +
+        '• "Turn the light on/off"\n' +
+        '• "Change to blue"\n' +
+        '• "Set the color to red"\n' +
+        '• "Make it green"'
+      );
     }
   }, [sendCommand]);
 
-  const handleVoiceResults = useCallback((event: any) => {
+  const loadOpenAIKey = async () => {
     try {
-      const results = event.value;
-      if (results && results.length > 0) {
-        const command = results[0].toLowerCase().trim();
-        console.log("Voice command received:", command);
-        setLastCommand(command);
-        parseVoiceCommand(command);
-      }
+      const key = await AsyncStorage.getItem("openAIKey");
+      if (key) setOpenAIKey(key);
     } catch (error) {
-      console.error("Error handling voice results:", error);
+      console.error("Error loading OpenAI key:", error);
     }
-  }, [parseVoiceCommand]);
+  };
+
+  const saveOpenAIKey = async (key: string) => {
+    try {
+      await AsyncStorage.setItem("openAIKey", key);
+    } catch (error) {
+      console.error("Error saving OpenAI key:", error);
+    }
+  };
+
+  const startRecording = async () => {
+    try {
+      await Audio.requestPermissionsAsync();
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+      setRecording(recording);
+      setIsListening(true);
+    } catch (err) {
+      console.error('Failed to start recording', err);
+      Alert.alert('Error', 'Failed to start recording');
+    }
+  };
+
+  const stopRecording = async () => {
+    if (!recording) return;
+
+    try {
+      await recording.stopAndUnloadAsync();
+      const uri = recording.getURI();
+      setRecording(null);
+      setIsListening(false);
+
+      if (!uri) throw new Error('No recording URI available');
+
+      // Create form data for OpenAI API
+      const formData = new FormData();
+      formData.append('file', {
+        uri,
+        type: 'audio/m4a',
+        name: 'recording.m4a',
+      } as any);
+      formData.append('model', 'whisper-1');
+
+      // Get transcription from OpenAI
+      const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${openAIKey}`,
+        },
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`OpenAI API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const command = data.text.trim();
+      
+      // Send the raw command to webhook
+      const queryParams = new URLSearchParams({
+        command: command
+      }).toString();
+      
+      const webhookResponse = await fetch(`${webhookUrl.trim()}?${queryParams}`);
+      if (!webhookResponse.ok) {
+        throw new Error(`Webhook error: ${webhookResponse.status}`);
+      }
+
+      // Show success message with the transcribed command
+      setLastCommand(command);
+      Alert.alert('Command Sent', `"${command}"`);
+
+    } catch (err) {
+      console.error('Error:', err);
+      Alert.alert('Error', 'Failed to process voice command');
+    }
+  };
+
+  const startVoiceRecognition = useCallback(async () => {
+    if (!openAIKey || !webhookUrl) {
+      Alert.alert('Error', 'Please set both OpenAI API key and webhook URL first');
+      return;
+    }
+
+    if (isListening) {
+      await stopRecording();
+    } else {
+      await startRecording();
+    }
+  }, [isListening, openAIKey, webhookUrl]);
 
   const setupVoice = useCallback(async () => {
     if (!VoiceModule) {
@@ -253,7 +364,7 @@ export default function HomeScreen() {
       console.error("Error setting up voice:", error);
       setVoiceAvailable(false);
     }
-  }, [handleVoiceResults]);
+  }, []);
 
   const cleanupVoice = useCallback(() => {
     if (!VoiceModule) return;
@@ -267,66 +378,90 @@ export default function HomeScreen() {
     }
   }, []);
 
-  const startVoiceRecognition = useCallback(async () => {
-    if (!VoiceModule) return;
-    try {
-      if (Platform.OS === "web") {
-        Alert.alert(
-          "Voice Recognition",
-          "Voice recognition is not available on web platform",
-        );
-        return;
-      }
-
-      if (!voiceAvailable) {
-        Alert.alert(
-          "Voice Recognition",
-          "Voice recognition is not available on this device",
-        );
-        return;
-      }
-
-      // Stop any existing recognition
-      await VoiceModule?.stop().catch(() => {});
-      await VoiceModule?.cancel().catch(() => {});
-
-      console.log("Starting voice recognition...");
-      await VoiceModule?.start("en-US");
-    } catch (error) {
-      console.error("Error starting voice recognition:", error);
-      setIsListening(false);
-      if (Platform.OS !== "web") {
-        Alert.alert(
-          "Error",
-          "Failed to start voice recognition. Please check microphone permissions.",
-        );
-      }
+  const convertVoiceToText = async (audioUri: string): Promise<string | null> => {
+    if (!openAIKey) {
+      Alert.alert("Error", "Please set your OpenAI API key in settings");
+      return null;
     }
-  }, [voiceAvailable]);
 
-  const stopVoiceRecognition = useCallback(async () => {
-    if (!VoiceModule) return;
     try {
-      console.log("Stopping voice recognition...");
-      await VoiceModule?.stop();
-      await VoiceModule?.cancel();
-      setIsListening(false);
+      // Read the audio file as base64
+      const audioBase64 = await FileSystem.readAsStringAsync(audioUri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      // Create form data
+      const formData = new FormData();
+      formData.append('file', {
+        uri: audioUri,
+        type: 'audio/m4a',
+        name: 'audio.m4a',
+      } as any);
+      formData.append('model', 'whisper-1');
+
+      // Make request to OpenAI
+      const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${openAIKey}`,
+        },
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+      }
+
+      const data: WhisperResponse = await response.json();
+      return data.text.trim().toLowerCase();
     } catch (error) {
-      console.error("Error stopping voice recognition:", error);
-      setIsListening(false);
+      console.error('Error converting voice to text:', error);
+      Alert.alert('Error', 'Failed to convert voice to text');
+      return null;
     }
-  }, []);
+  };
+
+  const handleVoiceResults = useCallback(async (event: any) => {
+    try {
+      const { value } = event;
+      if (value && value.length > 0) {
+        const audioUri = value[0];
+        const text = await convertVoiceToText(audioUri);
+        
+        if (text) {
+          console.log("Voice command received:", text);
+          setLastCommand(text);
+          processVoiceCommand(text);
+        }
+      }
+    } catch (error) {
+      console.error("Error handling voice results:", error);
+    }
+  }, [processVoiceCommand, convertVoiceToText]);
+
+
 
   useEffect(() => {
     const init = async () => {
-      await loadWebhookUrl();
-      await setupVoice();
+      await Promise.all([
+        loadWebhookUrl(),
+        loadOpenAIKey(),
+        setupVoice()
+      ]);
     };
     init();
     return () => {
       cleanupVoice();
     };
   }, [setupVoice, cleanupVoice]);
+
+  useEffect(() => {
+    return () => {
+      if (recording) {
+        recording.stopAndUnloadAsync();
+      }
+    };
+  }, [recording]);
 
   const loadWebhookUrl = async () => {
     try {
@@ -347,130 +482,107 @@ export default function HomeScreen() {
 
   return (
     <SafeAreaView className="flex-1 bg-gray-900">
-      <StatusBar barStyle="light-content" backgroundColor="#111827" />
+      <StatusBar 
+        barStyle="dark-content" 
+        backgroundColor="#FFFFFF"
+        translucent={false} 
+      />
       <ScrollView className="flex-1 px-6 py-8">
-        {/* App Title */}
         <Text className="text-4xl font-bold text-center mb-8 text-white">
           🏠 Hue Control
         </Text>
 
-        {/* ON/OFF Buttons */}
-        <View className="flex-row justify-center mb-12 gap-6">
-          <TouchableOpacity
-            className={`px-10 py-5 rounded-2xl shadow-lg ${
-              isLoading 
-                ? "bg-gray-700" 
-                : "bg-green-500 active:bg-green-600"
-            }`}
-            onPress={() => sendCommand("on")}
-            disabled={isLoading}
-          >
-            <Text className="text-white text-xl font-bold">ON</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            className={`px-10 py-5 rounded-2xl shadow-lg ${
-              isLoading 
-                ? "bg-gray-700" 
-                : "bg-red-500 active:bg-red-600"
-            }`}
-            onPress={() => sendCommand("off")}
-            disabled={isLoading}
-          >
-            <Text className="text-white text-xl font-bold">OFF</Text>
-          </TouchableOpacity>
-        </View>
+        {/* Main Content */}
+        {(!webhookUrl || !openAIKey) && (
+          <View className="bg-red-900/50 p-4 rounded-lg mb-6">
+            <Text className="text-white text-center">
+              ⚠️ Please add both your n8n webhook URL and OpenAI API key below to enable all features
+            </Text>
+          </View>
+        )}
 
         {/* Color Buttons */}
-        <Text className="text-xl font-bold text-center mb-6 text-white">
-          Colors
-        </Text>
-        <View className="flex-row flex-wrap justify-center mb-12 gap-4">
+        <View className="flex-row flex-wrap justify-center gap-4 mb-8">
           {COLORS.map((color) => (
             <ColorButton
               key={color.name}
               color={color}
               isLoading={isLoading}
-              onPress={(selectedColor) => sendCommand("color", selectedColor.value)}
+              onPress={() => sendCommand('set_color', color.name)}
             />
           ))}
         </View>
 
-        {/* Voice Control Button */}
-        {Platform.OS !== "web" && voiceAvailable && (
+        {/* Control Buttons */}
+        <View className="flex-row justify-center gap-4 mb-8">
           <TouchableOpacity
-            className={`mx-auto px-8 py-5 rounded-2xl shadow-lg mb-8 ${
-              isListening 
-                ? "bg-red-500" 
-                : isLoading 
-                  ? "bg-gray-700" 
-                  : "bg-blue-500 active:bg-blue-600"
-            }`}
-            onPress={isListening ? stopVoiceRecognition : startVoiceRecognition}
+            className="bg-green-600 px-8 py-4 rounded-xl shadow-lg"
+            onPress={() => sendCommand('turn_on')}
             disabled={isLoading}
           >
-            <Text className="text-white text-xl font-bold text-center">
-              🎤 {isListening ? "Stop Listening" : "Voice Control"}
-            </Text>
+            <Text className="text-white text-lg font-semibold">Turn On</Text>
           </TouchableOpacity>
-        )}
 
-        {/* Last Command Display */}
-        {lastCommand && (
-          <Text className="text-center text-gray-400 mb-8">
-            Last command: "{lastCommand}"
-          </Text>
-        )}
-
-        {/* Webhook URL Settings */}
-        <View className="bg-gray-800 p-6 rounded-2xl shadow-lg mb-8">
-          <Text className="text-xl font-bold mb-4 text-white">
-            ⚙️ Settings
-          </Text>
-          <Text className="text-sm text-gray-300 mb-3">n8n Webhook URL:</Text>
-          <TextInput
-            className="border border-gray-600 bg-gray-700 rounded-xl px-4 py-3 text-base text-white"
-            placeholder="https://your-n8n-instance.com/webhook/hue-control"
-            placeholderTextColor="#666"
-            value={webhookUrl}
-            onChangeText={(text) => {
-              setWebhookUrl(text);
-              saveWebhookUrl(text);
-            }}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
+          <TouchableOpacity
+            className="bg-red-600 px-8 py-4 rounded-xl shadow-lg"
+            onPress={() => sendCommand('turn_off')}
+            disabled={isLoading}
+          >
+            <Text className="text-white text-lg font-semibold">Turn Off</Text>
+          </TouchableOpacity>
         </View>
 
-        {/* Instructions */}
-        <View className="bg-gray-800 p-6 rounded-2xl shadow-lg">
-          <Text className="text-lg font-bold mb-4 text-white">
-            {Platform.OS !== "web" && voiceAvailable
-              ? "🗣 Voice Commands"
-              : "📝 Manual Controls"}
+        {/* Voice Control Button */}
+        <TouchableOpacity
+          className={`mx-auto px-8 py-5 rounded-2xl shadow-lg mb-8 ${
+            isListening 
+              ? "bg-red-600"
+              : (!webhookUrl || !openAIKey)
+                ? "bg-gray-600"
+                : "bg-blue-600"
+          }`}
+          onPress={startVoiceRecognition}
+          disabled={!webhookUrl || !openAIKey}
+        >
+          <Text className="text-white text-lg font-semibold">
+            {isListening ? "🎤 Listening... Tap to Send" : "🎤 Tap to Speak"}
           </Text>
-          {Platform.OS !== "web" && voiceAvailable ? (
-            <>
-              <Text className="text-gray-300 mb-2">• "Turn on" or "On"</Text>
-              <Text className="text-gray-300 mb-2">• "Turn off" or "Off"</Text>
-              <Text className="text-gray-300 mb-2">
-                • "Red", "Blue", "Green", "Yellow", "White"
-              </Text>
-              <Text className="text-gray-300">• "Change to [color]"</Text>
-            </>
-          ) : (
-            <>
-              <Text className="text-gray-300 mb-2">
-                • Use the ON/OFF buttons to control power
-              </Text>
-              <Text className="text-gray-300 mb-2">
-                • Tap color buttons to change light color
-              </Text>
-              <Text className="text-gray-300">
-                • Set your n8n webhook URL in settings
-              </Text>
-            </>
-          )}
+        </TouchableOpacity>
+
+        {lastCommand ? (
+          <Text className="text-gray-400 text-center mb-8">
+            Last command: "{lastCommand}"
+          </Text>
+        ) : null}
+
+        {/* Settings Section */}
+        <View className="bg-gray-800/50 rounded-xl p-4 mt-auto">
+          <Text className="text-white text-lg font-semibold mb-4">⚙️ Settings</Text>
+          
+          <View className="space-y-4">
+            <View>
+              <Text className="text-gray-400 text-sm mb-2">Webhook URL</Text>
+              <TextInput
+                className="bg-gray-800 text-white px-4 py-3 rounded-lg"
+                placeholder="Enter your n8n webhook URL"
+                placeholderTextColor="#666"
+                value={webhookUrl}
+                onChangeText={setWebhookUrl}
+              />
+            </View>
+
+            <View>
+              <Text className="text-gray-400 text-sm mb-2">OpenAI API Key</Text>
+              <TextInput
+                className="bg-gray-800 text-white px-4 py-3 rounded-lg"
+                placeholder="Enter your OpenAI API key"
+                placeholderTextColor="#666"
+                value={openAIKey}
+                onChangeText={setOpenAIKey}
+                secureTextEntry
+              />
+            </View>
+          </View>
         </View>
       </ScrollView>
     </SafeAreaView>
