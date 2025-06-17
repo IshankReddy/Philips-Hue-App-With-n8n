@@ -10,6 +10,7 @@ import {
   Platform,
   Pressable,
   StatusBar,
+  Image,  // Add this line
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Voice from "@react-native-voice/voice";
@@ -481,28 +482,33 @@ export default function HomeScreen() {
   };
 
   return (
-    <SafeAreaView className="flex-1 bg-gray-900">
+    <SafeAreaView className="flex-1 bg-black">
       <StatusBar 
         barStyle="dark-content" 
         backgroundColor="#FFFFFF"
         translucent={false} 
       />
       <ScrollView className="flex-1 px-6 py-8">
-        <Text className="text-4xl font-bold text-center mb-8 text-white">
-          🏠 Hue Control
+        <Image 
+          source={require('../assets/images/Kaviwebdesign-Logo.png')}
+          className="w-72 h-20 mx-auto"
+          resizeMode="contain"
+        />
+        <Text className="text-4xl font-bold text-center mb-20 text-white">
+          🏠Smart Controller
         </Text>
 
         {/* Main Content */}
-        {(!webhookUrl || !openAIKey) && (
+       {/* {(!webhookUrl || !openAIKey) && (
           <View className="bg-red-900/50 p-4 rounded-lg mb-6">
             <Text className="text-white text-center">
               ⚠️ Please add both your n8n webhook URL and OpenAI API key below to enable all features
             </Text>
           </View>
-        )}
+        )} */ }
 
         {/* Color Buttons */}
-        <View className="flex-row flex-wrap justify-center gap-4 mb-8">
+        <View className="flex-row flex-wrap justify-center gap-4 mb-20">
           {COLORS.map((color) => (
             <ColorButton
               key={color.name}
@@ -534,7 +540,7 @@ export default function HomeScreen() {
 
         {/* Voice Control Button */}
         <TouchableOpacity
-          className={`mx-auto px-8 py-5 rounded-2xl shadow-lg mb-8 ${
+          className={`mx-auto px-8 py-5 rounded-2xl shadow-lg mb-20 ${
             isListening 
               ? "bg-red-600"
               : (!webhookUrl || !openAIKey)
