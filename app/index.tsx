@@ -495,7 +495,7 @@ export default function HomeScreen() {
           resizeMode="contain"
         />
         <Text className="text-4xl font-bold text-center mb-20 text-white">
-          🏠Smart Controller
+          🏠 AI Controller
         </Text>
 
         {/* Main Content */}
